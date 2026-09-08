@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My Map</title>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  #map { position: absolute; top: 0; bottom: 0; left: 0; right: 0; }
+
+  #panel {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 1000;
+    background: white;
+    border-radius: 10px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.25);
+    padding: 14px;
+    width: 240px;
+    max-height: 85vh;
+    overflow-y: auto;
+  }
+
+  #panel h1 {
+    font-size: 15px;
+    margin: 0 0 10px 0;
+  }
+
+  #search {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 8px 10px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-size: 13px;
+    margin-bottom: 12px;
+  }
+
+  .cat-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .cat-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    border: 1px solid rgba(0,0,0,0.2);
+  }
+
+  .cat-row input { margin: 0; }
+
+  #count {
+    font-size: 12px;
+    color: #777;
+    margin-top: 10px;
+    border-top: 1px solid #eee;
+    padding-top: 8px;
+  }
+
+  .popup-content { font-size: 13px; max-width: 240px; }
+  .popup-content h3 { margin: 0 0 6px 0; font-size: 15px; }
+  .popup-content .cat-label {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    color: white;
+    margin-bottom: 6px;
+  }
+  .popup-content a { color: #1a73e8; }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="panel">
+  <h1>My Map</h1>
+  <input type="text" id="search" placeholder="Search locations..." />
+  <div id="categories"></div>
+  <div id="count"></div>
+</div>
+
+<script>
+// ---------- CONFIG ----------
+const GEOJSON_PATH = "data.geojson";
+
+// If your GeoJSON properties don't already have a "color" field,
+// define per-category colors here. Add/edit as needed.
+const CATEGORY_COLORS = {
+  "Food": "#e74c3c",
+  "Lodging": "#3498db",
+  "Nature": "#27ae60",
+  "Shopping": "#f39c12",
+  "Other": "#8e44ad"
+};
+const DEFAULT_COLOR = "#555555";
+// -----------------------------
+
+let map = L.map('map');
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+let allFeatures = [];
+let markers = [];              // {feature, marker, category}
+let activeCategories = new Set();
+let searchTerm = "";
+
+function colorFor(cat) {
+  return CATEGORY_COLORS[cat] || DEFAULT_COLOR;
+}
+
+function makeIcon(color) {
+  return L.divIcon({
+    className: "",
+    html: `<div style="
+        background:${color};
+        width:16px;height:16px;
+        border-radius:50% 50% 50% 0;
+        transform: rotate(-45deg);
+        border: 2px solid white;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+      "></div>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 16],
+    popupAnchor: [0, -16]
+  });
+}
+
+function buildPopup(props) {
+  const cat = props.category || "Other";
+  const color = colorFor(cat);
+  const name = props.name || "Untitled";
+  const desc = props.description || "";
+  const link = props.link;
+
+  let html = `<div class="popup-content">`;
+  html += `<span class="cat-label" style="background:${color}">${cat}</span>`;
+  html += `<h3>${name}</h3>`;
+  if (desc) html += `<p>${desc}</p>`;
+  if (link) html += `<a href="${link}" target="_blank" rel="noopener">More info →</a>`;
+  html += `</div>`;
+  return html;
+}
+
+function renderLegend(categories) {
+  const container = document.getElementById('categories');
+  container.innerHTML = "";
+  categories.forEach(cat => {
+    const row = document.createElement('label');
+    row.className = 'cat-row';
+    row.innerHTML = `
+      <input type="checkbox" checked data-cat="${cat}">
+      <span class="cat-dot" style="background:${colorFor(cat)}"></span>
+      <span>${cat}</span>
+    `;
+    container.appendChild(row);
+  });
+
+  container.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const cat = cb.getAttribute('data-cat');
+      if (cb.checked) activeCategories.add(cat);
+      else activeCategories.delete(cat);
+      applyFilters();
+    });
+  });
+}
+
+function applyFilters() {
+  let visibleCount = 0;
+  markers.forEach(m => {
+    const props = m.feature.properties;
+    const cat = props.category || "Other";
+    const name = (props.name || "").toLowerCase();
+    const desc = (props.description || "").toLowerCase();
+
+    const matchesCategory = activeCategories.has(cat);
+    const matchesSearch = searchTerm === "" ||
+      name.includes(searchTerm) || desc.includes(searchTerm);
+
+    if (matchesCategory && matchesSearch) {
+      if (!map.hasLayer(m.marker)) m.marker.addTo(map);
+      visibleCount++;
+    } else {
+      if (map.hasLayer(m.marker)) map.removeLayer(m.marker);
+    }
+  });
+  document.getElementById('count').textContent =
+    `Showing ${visibleCount} of ${markers.length} locations`;
+}
+
+document.getElementById('search').addEventListener('input', (e) => {
+  searchTerm = e.target.value.toLowerCase();
+  applyFilters();
+});
+
+fetch(GEOJSON_PATH)
+  .then(res => res.json())
+  .then(data => {
+    allFeatures = data.features || [];
+    const categorySet = new Set();
+
+    allFeatures.forEach(feature => {
+      if (!feature.geometry || feature.geometry.type !== "Point") return;
+      const [lng, lat] = feature.geometry.coordinates;
+      const props = feature.properties || {};
+      const cat = props.category || "Other";
+      categorySet.add(cat);
+
+      const marker = L.marker([lat, lng], { icon: makeIcon(colorFor(cat)) });
+      marker.bindPopup(buildPopup(props));
+      marker.addTo(map);
+
+      markers.push({ feature, marker, category: cat });
+    });
+
+    const categories = Array.from(categorySet).sort();
+    categories.forEach(c => activeCategories.add(c));
+    renderLegend(categories);
+    applyFilters();
+
+    // Fit map to markers
+    if (markers.length > 0) {
+      const group = L.featureGroup(markers.map(m => m.marker));
+      map.fitBounds(group.getBounds().pad(0.1));
+    } else {
+      map.setView([20, 0], 2);
+    }
+  })
+  .catch(err => {
+    console.error("Failed to load GeoJSON:", err);
+    document.getElementById('count').textContent = "Error loading data.geojson";
+    map.setView([20, 0], 2);
+  });
+</script>
+
+</body>
+</html>
