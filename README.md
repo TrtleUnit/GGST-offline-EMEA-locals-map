@@ -1,0 +1,1 @@
+# GGST-offline-EMEA-locals-map
